@@ -815,3 +815,61 @@ def test_anomaly_score_summary_reports_metrics_and_score_bands():
     assert summary["Unknown-score detections"] == 1
     assert summary["Highest score"] == 0.8
 
+
+
+
+def test_drift_investigation_filters_feature_severity_test_and_inclusive_dates():
+    import pandas as pd
+    from src.drift_utils import prepare_drift_investigation
+
+    rows = pd.DataFrame({
+        "Recorded At": ["2026-10-10T02:00:00Z", "2026-10-11T23:59:00Z", "2026-10-12T00:00:00Z"],
+        "Feature": ["amount", "amount", "age"],
+        "Severity": ["high", "high", "low"],
+        "Statistical Test": ["ks", "ks", "chi_square"],
+        "Test Statistic": [0.2, 0.5, 0.1],
+        "P-value": [0.04, 0.01, 0.2],
+    })
+    visible = prepare_drift_investigation(
+        rows, feature="amount", severity="high", test_method="ks",
+        start_date=pd.Timestamp("2026-10-10").date(),
+        end_date=pd.Timestamp("2026-10-11").date(),
+    )
+    assert len(visible) == 2
+    assert visible["Feature"].tolist() == ["amount", "amount"]
+    assert visible["Significance"].tolist() == ["Significant", "Significant"]
+
+
+def test_drift_investigation_sorts_p_values_and_handles_invalid_values():
+    import pandas as pd
+    from src.drift_utils import prepare_drift_investigation
+
+    rows = pd.DataFrame({
+        "Recorded At": ["2026-10-10T00:00:00Z"] * 3,
+        "Feature": ["a", "b", "c"],
+        "P-value": ["invalid", 0.2, 0.001],
+        "Test Statistic": [1, 3, 2],
+    })
+    visible = prepare_drift_investigation(rows, sort_by="Lowest p-value first")
+    assert visible["Feature"].tolist() == ["c", "b", "a"]
+    assert visible["Significance"].tolist() == ["Significant", "Not significant", "Unknown"]
+
+
+def test_drift_summary_counts_significance_and_unique_features():
+    import pandas as pd
+    from src.drift_utils import build_drift_summary, prepare_drift_investigation
+
+    rows = pd.DataFrame({
+        "Recorded At": ["2026-10-10T00:00:00Z"] * 4,
+        "Feature": ["a", "a", "b", ""],
+        "P-value": [0.01, 0.2, None, "invalid"],
+        "Test Statistic": [2.0, 1.0, 0.5, 0.1],
+    })
+    visible = prepare_drift_investigation(rows)
+    summary = build_drift_summary(visible).set_index("Metric")["Value"]
+    assert summary["Displayed drift events"] == 4
+    assert summary["Affected features"] == 2
+    assert summary["Significant (p < 0.05)"] == 1
+    assert summary["Not significant"] == 1
+    assert summary["Unknown p-value"] == 2
+    assert summary["Maximum test statistic"] == 2.0

@@ -6,6 +6,7 @@ import plotly.graph_objects as go
 import streamlit as st
 
 from src.anomaly_utils import build_anomaly_score_summary, prepare_anomaly_investigation
+from src.drift_utils import build_drift_summary, prepare_drift_investigation
 
 st.set_page_config(
     page_title="Self-Healing Data Pipeline",
@@ -296,31 +297,96 @@ if drift_events_24h:
         "recorded in the last 24 hours. Review the affected features and test results."
     )
 
-if drift_events_24h:
-    with st.expander("📉 Inspect recent detected drift", expanded=False):
-        drift_events = get_recent_drift_events(
-            limit=20, db_path=settings.database_path
-        )
-        if drift_events:
-            drift_df = pd.DataFrame(drift_events).rename(columns={
-                "run_id": "Pipeline Run",
-                "feature_name": "Feature",
-                "test_method": "Statistical Test",
-                "statistic": "Test Statistic",
-                "p_value": "P-value",
-                "severity": "Severity",
-                "created_at": "Recorded At",
-            })
-            st.dataframe(
-                drift_df[[
-                    "Recorded At", "Pipeline Run", "Feature", "Severity",
-                    "Statistical Test", "Test Statistic", "P-value",
-                ]].fillna(""),
-                use_container_width=True,
-                hide_index=True,
+with st.expander("📉 Inspect recent detected drift", expanded=False):
+    drift_limit = st.selectbox(
+        "Maximum recent drift events", options=[10, 20, 50, 100], index=1,
+        key="drift_history_limit",
+    )
+    drift_events = get_recent_drift_events(
+        limit=drift_limit, db_path=settings.database_path
+    )
+    if drift_events:
+        drift_df = pd.DataFrame(drift_events).rename(columns={
+            "run_id": "Pipeline Run",
+            "feature_name": "Feature",
+            "test_method": "Statistical Test",
+            "statistic": "Test Statistic",
+            "p_value": "P-value",
+            "severity": "Severity",
+            "created_at": "Recorded At",
+        })
+        drift_columns = [
+            "Recorded At", "Pipeline Run", "Feature", "Severity",
+            "Statistical Test", "Test Statistic", "P-value",
+        ]
+        drift_base = drift_df[drift_columns].fillna("")
+        dcol1, dcol2, dcol3 = st.columns(3)
+        with dcol1:
+            drift_features = ["All features"] + sorted(
+                x for x in drift_base["Feature"].astype(str).unique() if x.strip()
             )
+            selected_drift_feature = st.selectbox(
+                "Filter by feature", drift_features, key="drift_feature_filter"
+            )
+        with dcol2:
+            drift_severities = ["All severities"] + sorted(
+                x for x in drift_base["Severity"].astype(str).unique() if x.strip()
+            )
+            selected_drift_severity = st.selectbox(
+                "Filter by severity", drift_severities, key="drift_severity_filter"
+            )
+        with dcol3:
+            drift_tests = ["All tests"] + sorted(
+                x for x in drift_base["Statistical Test"].astype(str).unique() if x.strip()
+            )
+            selected_drift_test = st.selectbox(
+                "Filter by statistical test", drift_tests, key="drift_test_filter"
+            )
+        ddate1, ddate2 = st.columns(2)
+        with ddate1:
+            drift_start_date = st.date_input(
+                "From date (UTC)", value=None, key="drift_date_start"
+            )
+        with ddate2:
+            drift_end_date = st.date_input(
+                "Through date (UTC)", value=None, key="drift_date_end"
+            )
+        drift_sort = st.selectbox(
+            "Sort drift events",
+            options=["Newest first", "Oldest first", "Lowest p-value first", "Highest statistic first"],
+            key="drift_sort_order",
+        )
+        if drift_start_date is not None and drift_end_date is not None and drift_start_date > drift_end_date:
+            st.warning("The start date is after the end date. Please correct the date range.")
+            visible_drift = drift_base.iloc[0:0].copy()
         else:
-            st.caption("No detected drift events are currently recorded.")
+            visible_drift = prepare_drift_investigation(
+                drift_base, feature=selected_drift_feature,
+                severity=selected_drift_severity, test_method=selected_drift_test,
+                start_date=drift_start_date, end_date=drift_end_date, sort_by=drift_sort,
+            )
+        drift_summary = build_drift_summary(visible_drift)
+        summary_cols = st.columns(4)
+        summary_cols[0].metric("Displayed drift events", len(visible_drift))
+        summary_cols[1].metric("Significant (p < 0.05)", int((drift_summary["Significance"] == "Significant").sum()))
+        numeric_p = pd.to_numeric(visible_drift["P-value"], errors="coerce")
+        summary_cols[2].metric("Lowest p-value", f"{numeric_p.min():.4g}" if numeric_p.notna().any() else "N/A")
+        summary_cols[3].metric("Affected features", visible_drift["Feature"].nunique())
+        st.dataframe(visible_drift, use_container_width=True, hide_index=True)
+        st.download_button(
+            "⬇️ Download filtered drift events (CSV)",
+            data=visible_drift.to_csv(index=False).encode("utf-8"),
+            file_name="drift_investigation.csv", mime="text/csv",
+            key="download_filtered_drift_events",
+        )
+        st.download_button(
+            "⬇️ Download drift summary (CSV)",
+            data=drift_summary.to_csv(index=False).encode("utf-8"),
+            file_name="drift_investigation_summary.csv", mime="text/csv",
+            key="download_drift_summary",
+        )
+    else:
+        st.caption("No detected drift events are currently recorded.")
 
 # Provide an operator-friendly run history view with quality and processing outcomes.
 with st.expander("🧾 Inspect recent pipeline runs", expanded=False):
